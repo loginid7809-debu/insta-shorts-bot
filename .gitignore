@@ -1,0 +1,17 @@
+# secrets & credentials - NEVER commit these
+service_account.json
+client_secret.json
+youtube_secrets.json
+token.json
+cookies.txt
+*.pem
+
+# runtime
+work/
+run.log
+*.mp4
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/

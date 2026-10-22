@@ -1,0 +1,69 @@
+# ============================================================================
+#  Instagram -> YouTube Shorts bot : configuration
+#  Everything here can be overridden by environment variables in GitHub Actions.
+# ============================================================================
+
+work_dir: work           # temp space for downloads (wiped after every video)
+
+google:
+  sheet_id: "137vCahpUWI5JKzSHAngc2byUJDYjNXywuh9EDJ-KQ60"                           # <- your spreadsheet id (or set SHEET_ID secret)
+  service_account_file: service_account.json
+  pending_tab: Pending
+  uploaded_tab: Uploaded
+  failed_tab: Failed
+  log_tab: Log
+  state_tab: State
+
+download:
+  # Optional: cookies for private/age-gated posts. Public reels need none.
+  cookies_file: ""                       # e.g. cookies.txt  (or IG_COOKIES_FILE)
+  proxy: ""                              # e.g. http://user:pass@host:port (or HTTP_PROXY_URL)
+  max_duration_sec: 180                  # YouTube Shorts limit is 180s
+  trim_longer_videos: false              # true = cut longer videos to 180s, false = fail the row
+  retries: 4
+  socket_timeout: 30
+  extra_opts: {}                         # raw yt-dlp options, e.g. {format: "best"}
+
+video:                                   # strict Shorts output format
+  width: 1080
+  height: 1920                           # 9:16 vertical
+  fps: 30
+  max_duration_sec: 180
+  pad_mode: blur                         # blur = blurred bars | black = bars | crop = centre-crop
+  crf: 20                                # 18 (better) .. 24 (smaller file)
+  preset: veryfast
+  ensure_audio: true                     # adds a silent audio track if the source has none
+
+youtube:
+  category_id: "24"                      # 24 = Entertainment (22 People & Blogs, 10 Music, 23 Comedy)
+  made_for_kids: false
+  default_language: en
+  playlist_id: ""                        # optional: every Short is also added to this playlist
+  notify_subscribers: true
+  publish_buffer_minutes: 15             # first Short goes live ~15 min after upload
+  min_gap_minutes: 60                    # <<< one hour between consecutive publish times
+  daily_upload_limit: 6                  # hard stop: 6 uploads/day = ~9.6k API units
+  uploads_per_run: 1                     # how many videos one workflow run may upload
+  max_attempts: 3                        # failures before a row is moved to the Failed tab
+  timezone: Asia/Kolkata                 # used for scheduling + "today" accounting
+
+metadata:
+  title_suffix: "#shorts"                # appended to every title if not already there
+  title_max_len: 100                     # YouTube hard limit
+  fallback_title: "Wait for it 😱"        # used when the Instagram caption is empty
+  default_hashtags:                      # always appended to the description
+    - shorts
+    - reels
+    - viral
+    - trending
+    - foryou
+    - explore
+  extra_tags:                            # extra YouTube tags (not shown publicly)
+    - shorts
+    - youtube shorts
+    - instagram reels
+    - trending reels
+  max_hashtags_in_description: 12
+  description_footer: ""                 # optional extra line, e.g. "Follow for more 🔥"
+  credit_original_creator: true          # adds "Credit: @original_author" to the description
+  max_description_len: 4900
