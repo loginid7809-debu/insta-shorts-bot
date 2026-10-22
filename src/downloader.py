@@ -13,14 +13,21 @@ from pathlib import Path
 from typing import Any
 
 from .config import DownloadConfig
+from .errors import ShortsBotError, TransientError
 
 
-class DownloadError(RuntimeError):
-    """Raised when a URL cannot be downloaded."""
+class DownloadError(ShortsBotError):
+    """Permanent: this URL will not work, retrying is pointless."""
+
+
+class TransientDownloadError(DownloadError, TransientError):
+    """Instagram blocked us / network hiccup: retry next hour, keep the row queued."""
+
+    transient = True
 
 
 class VideoTooLongError(DownloadError):
-    """Raised when the source video exceeds the Shorts duration limit."""
+    """Permanent: the source video exceeds the Shorts duration limit."""
 
 
 @dataclass
@@ -50,31 +57,37 @@ class DownloadedVideo:
         return f"{self.width}x{self.height} (portrait {ratio:.2f})"
 
 
-_FRIENDLY_ERRORS = (
-    (r"empty media response|no video formats found|unable to extract",
-     "Instagram returned no media. Either the post is private/removed, or Instagram is "
-     "blocking the runner \u2014 add IG cookies (IG_COOKIES_B64) or a proxy (HTTP_PROXY_URL)."),
-    (r"login required|requested content is not available|rate.?limit|checkpoint",
-     "Instagram blocked the request (login/rate limit). Add IG cookies (IG_COOKIES_B64) "
-     "or a proxy \u2014 see docs/TROUBLESHOOTING.md"),
-    (r"private (account|video|post)", "The post is from a private account. Public posts only."),
-    (r"unsupported url", "This is not a supported Instagram post/reel URL."),
-    (r"video is not available|404|not found",
-     "Post not found \u2014 deleted, or the URL is wrong."),
-    (r"timed out|timeout|connection", "Network timeout while downloading. Will retry next run."),
+# (regex, friendly message, is_transient)
+_ERROR_MAP = (
+    (r"empty media response|no video formats found|unable to extract|"
+     r"login required|rate.?limit|checkpoint|too many requests|429",
+     "Instagram blocked the request (login/rate limit). Retried automatically next hour; "
+     "add IG cookies (IG_COOKIES_B64) or a proxy (HTTP_PROXY_URL) for a permanent fix.",
+     True),
+    (r"timed out|timeout|connection|temporary failure|network|502|503|504|"
+     r"read timed out|remote end closed",
+     "Network problem while downloading from Instagram. Retried automatically next hour.",
+     True),
+    (r"private (account|video|post)|login required to view",
+     "The post is from a private account. Public posts only.", False),
+    (r"unsupported url",
+     "This is not a supported Instagram post/reel URL.", False),
+    (r"video is not available|404|not found|has been removed",
+     "Post not found \u2014 deleted, or the URL is wrong.", False),
 )
 
 
-def _friendly(exc: Exception) -> str:
-    msg = str(exc)
-    # yt-dlp appends long "See https://github.com/..." help text - drop it
-    first = msg.strip().splitlines()[0] if msg.strip() else exc.__class__.__name__
+def classify_error(exc: Exception) -> tuple[str, bool]:
+    """Return (human message, is_transient) for a yt-dlp failure."""
+    raw = str(exc)
+    first = raw.strip().splitlines()[0] if raw.strip() else exc.__class__.__name__
     short = re.split(r"\s+See\s+https?://", first)[0]
     short = re.sub(r"^ERROR:\s*", "", short).strip()
-    for pattern, friendly in _FRIENDLY_ERRORS:
-        if re.search(pattern, msg, re.IGNORECASE):
-            return f"{friendly} [raw: {short[:220]}]"
-    return short[:400]
+    for pattern, friendly, transient in _ERROR_MAP:
+        if re.search(pattern, raw, re.IGNORECASE):
+            return f"{friendly} [raw: {short[:220]}]", transient
+    # unknown yt-dlp failure: assume it is worth retrying (safer than blacklisting)
+    return short[:400], True
 
 
 def build_ydl_opts(cfg: DownloadConfig, out_dir: Path) -> dict[str, Any]:
@@ -148,7 +161,8 @@ def download(url: str, out_dir: Path, cfg: DownloadConfig, logger: logging.Logge
     except DownloadError:
         raise
     except Exception as exc:  # yt-dlp raises many exception types
-        raise DownloadError(_friendly(exc)) from exc
+        message, transient = classify_error(exc)
+        raise (TransientDownloadError if transient else DownloadError)(message) from exc
 
     # Instagram often omits duration/dimensions -> fall back to ffprobe so the
     # 180 s Shorts guard is always enforced.
