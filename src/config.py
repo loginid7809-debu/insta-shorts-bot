@@ -43,6 +43,7 @@ class VideoConfig:
     height: int = 1920
     fps: int = 30
     max_duration_sec: int = 180
+    min_duration_sec: float = 1.0
     pad_mode: str = "blur"  # blur | black | crop
     crf: int = 20
     preset: str = "veryfast"
