@@ -18,9 +18,24 @@ from zoneinfo import ZoneInfo
 from . import downloader, video as video_mod
 from .config import AppConfig
 from .downloader import DownloadError, VideoTooLongError
+from .errors import ShortsBotError
 from .metadata import VideoMetadata, build_metadata
 from .sheets import PendingItem, SheetQueue, iso, utcnow
 from .youtube import QuotaExceeded, UploadFailed, build_client, next_publish_slot, upload_video
+
+
+_TRANSIENT_HINTS = (
+    "timeout", "timed out", "connection", "temporarily unavailable", "rate limit",
+    "rate.?limit", "quota", "429", "500", "502", "503", "504", "backend error",
+    "try again", "reset by peer", "emptied", "ssl",
+)
+
+
+def _looks_transient(message: str) -> bool:
+    import re
+
+    low = (message or "").lower()
+    return any(re.search(hint, low) for hint in _TRANSIENT_HINTS)
 
 
 @dataclass
@@ -118,11 +133,11 @@ class Pipeline:
                 stats.stopped_reason = "quota exhausted"
                 if stop_after_quota_error:
                     break
-            except (DownloadError, VideoTooLongError, UploadFailed) as exc:
-                self._handle_failure(item, str(exc), stats)
+            except ShortsBotError as exc:
+                self._handle_failure(item, exc, stats)
             except Exception as exc:  # unexpected - log, retry later, keep draining
                 self.log.exception("Unexpected error on %s", item.url)
-                self._handle_failure(item, f"{exc.__class__.__name__}: {exc}", stats)
+                self._handle_failure(item, exc, stats)
 
         self.log.info("Run finished: %s", stats.line())
         self.sheets.append_log("INFO", f"Run finished: {stats.line()}")
@@ -206,17 +221,39 @@ class Pipeline:
         finally:
             self._cleanup(tmp)
 
-    def _handle_failure(self, item: PendingItem, error: str, stats: RunStats) -> None:
+    def _handle_failure(self, item: PendingItem, exc: BaseException, stats: RunStats) -> None:
+        """Decide whether this failure is worth counting against the URL.
+
+        Transient (Instagram rate limit, network, quota, 5xx): the row stays in the
+        queue, keeps its attempt count, and is simply retried on the next hourly run.
+        Permanent (private/deleted post, unsupported URL, too long, rejected upload):
+        attempts are counted and the row moves to Failed at `max_attempts`.
+        """
+        message = str(exc) or exc.__class__.__name__
+        transient = bool(getattr(exc, "transient", False)) or _looks_transient(message)
+
+        if transient:
+            self.log.warning(
+                "Transient failure - row stays in Pending, no attempt used: %s", message
+            )
+            if item.row > 0:
+                self.sheets.set_status(item.row, "PENDING", f"auto-retry next run: {message}")
+            self.sheets.append_log("RETRY-SOON", f"{item.url} :: {message[:250]}")
+            stats.requeued += 1
+            return
+
         attempts = item.attempts + 1
         max_attempts = max(1, self.cfg.youtube.max_attempts)
-        self.log.error("Failed (%s/%s): %s", attempts, max_attempts, error)
+        self.log.error("Failed (%s/%s): %s", attempts, max_attempts, message)
         if attempts >= max_attempts:
-            self.sheets.move_to_failed(item.url, error, attempts)
-            self.sheets.append_log("FAILED", f"{item.url} :: {error[:300]}")
+            if item.row > 0:
+                self.sheets.move_to_failed(item.url, message, attempts)
+            self.sheets.append_log("FAILED", f"{item.url} :: {message[:300]}")
             stats.failed += 1
         else:
-            self.sheets.set_status_with_attempts(item.row, "ERROR", attempts, error)
-            self.sheets.append_log("RETRY", f"{item.url} attempt {attempts}: {error[:250]}")
+            if item.row > 0:
+                self.sheets.set_status_with_attempts(item.row, "ERROR", attempts, message)
+            self.sheets.append_log("RETRY", f"{item.url} attempt {attempts}: {message[:250]}")
             stats.requeued += 1
 
     def _ensure_work_root(self) -> Path:
