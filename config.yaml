@@ -28,7 +28,8 @@ video:                                   # strict Shorts output format
   width: 1080
   height: 1920                           # 9:16 vertical
   fps: 30
-  max_duration_sec: 180
+  max_duration_sec: 180                  # Shorts limit: 3 minutes
+  min_duration_sec: 1                    # Shorts must be at least 1 second
   pad_mode: blur                         # blur = blurred bars | black = bars | crop = centre-crop
   crf: 20                                # 18 (better) .. 24 (smaller file)
   preset: veryfast
