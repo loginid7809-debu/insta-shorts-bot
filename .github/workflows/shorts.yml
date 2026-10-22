@@ -1,0 +1,95 @@
+name: Instagram to YouTube Shorts
+
+# ---------------------------------------------------------------------------
+#  Runs 24x a day (hourly). Each run uploads ONE Short and schedules it at
+#  least one hour after the previous publish time - that is what creates the
+#  "1 AM, 2 AM, 3 AM ..." ladder. Leftover URLs are simply picked up next hour.
+# ---------------------------------------------------------------------------
+on:
+  schedule:
+    - cron: "5 * * * *"      # every hour at :05 UTC
+  workflow_dispatch:          # manual "Run workflow" button
+    inputs:
+      limit:
+        description: "Max uploads this run"
+        required: false
+        default: "1"
+      dry_run:
+        description: "Dry run (download + convert only, no upload)"
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shorts-uploader     # never let two runs overlap
+  cancel-in-progress: false
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Show tool versions
+        run: |
+          ffmpeg -version | head -1
+          python -m yt_dlp --version
+
+      - name: Process queue
+        env:
+          SHEET_ID:        ${{ secrets.SHEET_ID }}
+          GCP_SA_JSON:     ${{ secrets.GCP_SA_JSON }}
+          YT_CLIENT_ID:    ${{ secrets.YT_CLIENT_ID }}
+          YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+          YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+          IG_COOKIES_B64:  ${{ secrets.IG_COOKIES_B64 }}
+          HTTP_PROXY_URL:  ${{ secrets.HTTP_PROXY_URL }}
+          DAILY_UPLOAD_LIMIT: "6"
+          UPLOADS_PER_RUN: ${{ github.event.inputs.limit || '1' }}
+          MIN_GAP_MINUTES: "60"
+          TIMEZONE: "Asia/Kolkata"
+          INPUT_DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+        run: |
+          # optional Instagram cookies (only needed for private/age-gated posts)
+          if [ -n "$IG_COOKIES_B64" ]; then
+            echo "$IG_COOKIES_B64" | base64 -d > cookies.txt
+            export IG_COOKIES_FILE="$PWD/cookies.txt"
+          fi
+
+          FLAGS=""
+          if [ "$INPUT_DRY_RUN" = "true" ]; then FLAGS="--dry-run"; fi
+
+          python main.py $FLAGS --limit "$UPLOADS_PER_RUN"
+
+      - name: Cleanup temp files
+        if: always()
+        run: rm -rf work cookies.txt
+
+      - name: Upload run log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-log-${{ github.run_id }}
+          path: run.log
+          if-no-files-found: ignore
+          retention-days: 7
