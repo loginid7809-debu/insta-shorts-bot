@@ -6,9 +6,13 @@ name: Instagram to YouTube Shorts
 #  "1 AM, 2 AM, 3 AM ..." ladder. Leftover URLs are simply picked up next hour.
 # ---------------------------------------------------------------------------
 on:
-  schedule:
-    - cron: "5 * * * *"      # every hour at :05 UTC
-  workflow_dispatch:          # manual "Run workflow" button
+  # The hourly trigger now lives in Google Apps Script (apps-script/Code.gs),
+  # which is more reliable than GitHub's best-effort cron and is never disabled
+  # for repo inactivity. Uncomment the two lines below ONLY if you want GitHub
+  # itself to trigger too (you would then get two runs per hour).
+  # schedule:
+  #   - cron: "5 * * * *"
+  workflow_dispatch:          # triggered by Apps Script + the manual button
     inputs:
       limit:
         description: "Max uploads this run"
