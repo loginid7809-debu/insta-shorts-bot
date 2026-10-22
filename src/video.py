@@ -21,7 +21,15 @@ from .config import VideoConfig
 
 
 class VideoError(RuntimeError):
-    pass
+    """The file could not be produced/parsed."""
+
+
+class ShortsComplianceError(VideoError):
+    """The output exists but would NOT be treated as a Short by YouTube.
+
+    Permanent error: retrying the same source will produce the same result, so the
+    pipeline counts attempts and eventually moves the row to the Failed tab.
+    """
 
 
 @dataclass
@@ -158,6 +166,32 @@ def _video_filter(info: VideoInfo, cfg: VideoConfig) -> tuple[list[str], str | N
     return [], graph
 
 
+def assert_shorts_compliant(info: VideoInfo, cfg: VideoConfig) -> None:
+    """Hard gate: refuse to upload anything YouTube would not accept as a Short.
+
+    Shorts eligibility (2026): vertical or square aspect ratio and duration
+    between 1 second and 3 minutes. We additionally pin 1080x1920 H.264/AAC so
+    every upload is byte-for-byte in the expected format.
+    """
+    problems: list[str] = []
+    if (info.width, info.height) != (cfg.width, cfg.height):
+        problems.append(f"resolution is {info.width}x{info.height}, expected {cfg.width}x{cfg.height}")
+    if info.height and info.width / info.height > 1.0 + 1e-6:
+        problems.append(f"aspect ratio {info.width}x{info.height} is horizontal (Shorts must be vertical or square)")
+    if info.duration < cfg.min_duration_sec:
+        problems.append(f"duration {info.duration:.2f}s is below the {cfg.min_duration_sec}s minimum")
+    if info.duration > cfg.max_duration_sec + 1.5:
+        problems.append(f"duration {info.duration:.1f}s exceeds the {cfg.max_duration_sec}s Shorts limit")
+    if not info.has_audio:
+        problems.append("no audio stream (YouTube requires one)")
+    if info.vcodec != "h264":
+        problems.append(f"video codec is {info.vcodec}, expected h264")
+    if info.acodec and info.acodec != "aac":
+        problems.append(f"audio codec is {info.acodec}, expected aac")
+    if problems:
+        raise ShortsComplianceError("Not Shorts-compliant: " + "; ".join(problems))
+
+
 def to_shorts(src: Path, dst: Path, cfg: VideoConfig, logger: logging.Logger | None = None) -> VideoInfo:
     """Re-encode *src* into a Shorts-compliant MP4 at *dst*; return output info."""
     logger = logger or logging.getLogger(__name__)
@@ -204,13 +238,6 @@ def to_shorts(src: Path, dst: Path, cfg: VideoConfig, logger: logging.Logger | N
         raise VideoError(f"ffmpeg failed: {(proc.stderr or '').strip()[-700:]}")
 
     out = probe(dst)
-    if (out.width, out.height) != (cfg.width, cfg.height):
-        raise VideoError(f"Output is {out.width}x{out.height}, expected {cfg.width}x{cfg.height}")
-    if not out.has_audio:
-        raise VideoError("Output has no audio track (YouTube requires one).")
-    if out.duration > cfg.max_duration_sec + 1.5:
-        raise VideoError(f"Output is {out.duration:.1f}s, longer than {cfg.max_duration_sec}s")
-    if out.vcodec != "h264":
-        raise VideoError(f"Unexpected video codec: {out.vcodec}")
-    logger.info("Encoded: %s (%.1f MB)", out.summary(), dst.stat().st_size / 1_048_576)
+    assert_shorts_compliant(out, cfg)
+    logger.info("Encoded + verified: %s (%.1f MB)", out.summary(), dst.stat().st_size / 1_048_576)
     return out
