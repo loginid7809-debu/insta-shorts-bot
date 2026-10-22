@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src import pipeline as P
 from src.config import AppConfig
+from src.downloader import DownloadError, TransientDownloadError, VideoTooLongError
 from src.sheets import PendingItem
 from src.video import VideoInfo
 from src.youtube import QuotaExceeded, UploadFailed
@@ -180,9 +181,9 @@ def test_daily_cap_stops_the_run(env):
     assert queue.rows[0].url == "u1"                  # untouched, will retry tomorrow
 
 
-def test_failure_is_retried_then_moved_to_failed(env, monkeypatch):
+def test_permanent_failure_is_retried_then_moved_to_failed(env, monkeypatch):
     def boom(url, out_dir, cfg, logger):
-        raise UploadFailed("Instagram blocked the request")
+        raise VideoTooLongError("Source video is 400s but YouTube Shorts allow max 180s")
 
     monkeypatch.setattr(P.downloader, "download", boom)
     pipe, queue, _ = env(["u1"])
@@ -227,3 +228,50 @@ def test_manual_url_bypasses_the_queue(env):
     assert stats.uploaded == 1
     assert len(queue.uploaded) == 1                   # recorded so the ladder continues
     assert queue.rows == []
+
+
+# ------------------------------------------------- transient error handling
+def test_transient_error_keeps_row_and_never_counts_an_attempt(env, monkeypatch):
+    """An Instagram rate-limit / network blip must never send a good URL to Failed."""
+
+    def blocked(url, out_dir, cfg, logger):
+        raise TransientDownloadError("Instagram blocked the request (login/rate limit)")
+
+    monkeypatch.setattr(P.downloader, "download", blocked)
+    pipe, queue, _ = env(["u1"], max_attempts=1)   # even with max_attempts = 1
+
+    for _ in range(5):                             # five hourly runs
+        stats = pipe.run(limit=1)
+        assert stats.failed == 0
+        assert stats.requeued == 1
+
+    assert len(queue.rows) == 1                    # still queued
+    assert queue.rows[0].attempts == 0             # no attempt burned
+    assert queue.rows[0].status == "PENDING"       # looks retryable, not broken
+    assert queue.failed == []
+    assert any(level == "RETRY-SOON" for level, _ in queue.logs)
+
+
+def test_unexpected_network_error_is_treated_as_transient(env, monkeypatch):
+    def flaky(url, out_dir, cfg, logger):
+        raise RuntimeError("HTTPSConnectionPool: Read timed out. (read timeout=30)")
+
+    monkeypatch.setattr(P.downloader, "download", flaky)
+    pipe, queue, _ = env(["u1"], max_attempts=1)
+    stats = pipe.run(limit=1)
+
+    assert stats.failed == 0 and stats.requeued == 1
+    assert queue.rows[0].attempts == 0
+
+
+def test_permanent_error_still_counts_attempts(env, monkeypatch):
+    def deleted(url, out_dir, cfg, logger):
+        raise DownloadError("Post not found - deleted, or the URL is wrong.")
+
+    monkeypatch.setattr(P.downloader, "download", deleted)
+    pipe, queue, _ = env(["u1"], max_attempts=2)
+
+    assert pipe.run(limit=1).requeued == 1
+    assert queue.rows[0].attempts == 1
+    assert pipe.run(limit=1).failed == 1
+    assert queue.failed[0][0] == "u1"
