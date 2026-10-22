@@ -36,10 +36,27 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install ffmpeg
+      # ffmpeg ships with the ubuntu-latest runner image. We only fetch a static
+      # build if it is missing - NEVER use `apt-get` here: `apt-get update` can
+      # block for many minutes on the dpkg lock and looks like a frozen job.
+      - name: Ensure ffmpeg
+        timeout-minutes: 5
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg
+          set -euo pipefail
+          if command -v ffmpeg >/dev/null 2>&1 && command -v ffprobe >/dev/null 2>&1; then
+            echo "ffmpeg already installed:"
+            ffmpeg -version | head -1
+            ffprobe -version | head -1
+            exit 0
+          fi
+          echo "ffmpeg not found - downloading a static build"
+          curl -fsSL --retry 3 --connect-timeout 20 -o /tmp/ffmpeg.tar.xz \
+            https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
+          tar -xJf /tmp/ffmpeg.tar.xz -C /tmp
+          dir="$(find /tmp -maxdepth 1 -type d -name 'ffmpeg-*-amd64-static' | head -1)"
+          sudo install -m755 "$dir/ffmpeg" "$dir/ffprobe" /usr/local/bin/
+          ffmpeg -version | head -1
+          ffprobe -version | head -1
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -48,7 +65,8 @@ jobs:
           cache: pip
 
       - name: Install Python dependencies
-        run: pip install -r requirements.txt
+        timeout-minutes: 8
+        run: pip install --no-input --disable-pip-version-check -r requirements.txt
 
       - name: Show tool versions
         run: |
@@ -56,6 +74,7 @@ jobs:
           python -m yt_dlp --version
 
       - name: Process queue
+        timeout-minutes: 30
         env:
           SHEET_ID:        ${{ secrets.SHEET_ID }}
           GCP_SA_JSON:     ${{ secrets.GCP_SA_JSON }}
@@ -83,6 +102,7 @@ jobs:
 
       - name: Cleanup temp files
         if: always()
+        timeout-minutes: 2
         run: rm -rf work cookies.txt
 
       - name: Upload run log
